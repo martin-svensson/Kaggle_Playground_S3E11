@@ -1,0 +1,283 @@
+---
+title: "EDA"
+format: html
+editor: 
+  markdown: 
+    wrap: 72
+---
+
+## Setup
+
+```{r}
+#| output: false
+
+library(data.table)
+library(tidyverse)
+library(magrittr)
+
+library(here) # avoid having to change between . and .. when running interactively vs knitting
+library(DataExplorer)
+library(tidymodels)
+library(vip)
+library(gridExtra)
+```
+
+```{r load_data}
+#| cache: true
+
+load(here("Output/01_output.RData"))
+```
+
+Use only training data for the EDA
+
+```{r}
+df_train_split <- training(output_01$data_split)
+```
+
+```{r}
+summary(df_train_split)
+```
+
+A very straight forward data set. Fortunately, no missing values.
+
+## Marginal Distributions
+
+```{r}
+df_train_split %>%
+  select(!id) %>% 
+  plot_histogram(ncol = 3)
+```
+
+```{r}
+df_train_split %>% 
+  select(!id) %>% 
+  mutate(
+    num_children_diff = 
+      (as.integer(total_children) - as.integer(num_children_at_home)) %>% 
+      as_factor %>% 
+      as.ordered
+  ) %>% 
+  plot_bar()
+```
+
+Take aways: 
+
+* There are no factor variables which are not ordinal 
+* Data scarcity: num_children_at_home (\>= 2) and unit_sales in millions
+(inlcude 1 in 2 (\<= 2) as well as 5 and in 4 (\>= 4)) needs grouping.
+All the binary variables have adequate data in both levels.
+* Non of the continous distributions has a very skewed distribution, so transformations are probably not needed. 
+
+
+### Distributions by target
+
+```{r}
+df_train_split %>% 
+  select(!id) %>% 
+  plot_boxplot(
+    "cost", 
+    ncol = 3
+  )
+```
+
+```{r}
+#| fig-height: 3
+#| fig-width: 5
+
+vars_factor <- 
+  c("unit_sales",
+    "total_children",
+    "num_children_at_home",
+    "avg_cars_at.home")
+
+walk(
+  vars_factor,
+  ~ df_train_split %>% 
+    select(cost, where(is.factor)) %>% 
+    plot_boxplot(
+      by = .x
+    )
+) 
+```
+
+
+```{r}
+vars_binary <- 
+  c("recyclable_package", 
+    "low_fat",
+    "coffee_bar",
+    "video_store",
+    "salad_bar",
+    "prepared_food",
+    "florist")
+
+vars_binary_plot <- 
+  map(
+    vars_binary,
+    ~ df_train_split %>% 
+      ggplot(aes(x = cost, fill = as.factor(!!sym(.x)))) + 
+      geom_density(alpha = 0.1) + 
+      theme(legend.position = "bottom")
+  ) 
+```
+
+```{r}
+#| fig-height: 2
+ggpubr::ggarrange(
+  plotlist = vars_binary_plot, 
+  ncol = 2
+)
+```
+
+Take aways:
+
+* There are quite a few variables which do not seem to have a relationship with cost, at least not marginally. For a few of them, specific levels do seem to correlate with cost. 
+* Using box plots are probably not the best strategy for ordinal factors, but whatever
+* Salad bar and prepared food looks identical
+
+## Validating data
+
+**Is total_children \>= num_children_at_home for all
+observations?**
+
+```{r}
+df_train_split %>% 
+  mutate(
+    children_diff = as.integer(total_children) - as.integer(num_children_at_home)
+  ) %>% 
+  filter(
+    children_diff < 0
+  )
+```
+
+There are so few, it probably does not make a difference. 
+
+## Correlation
+
+```{r}
+df_train_split %>% 
+  select(!id) %>% 
+  plot_correlation(type = "continuous")
+```
+
+```{r}
+df_train_split %>% 
+  select(!id) %>% 
+  plot_correlation(type = "discrete")
+```
+
+Correlation is not a big problem when we are only concerned with prediction and not inference. Otherwise, some VIF analysis would be in order it seems. 
+
+## Variable importance
+
+### Only main effects
+
+```{r}
+# -- Include "brute force" interaction terms
+
+rerun_main <- FALSE
+if (rerun_main) {
+  rf_fit_main <-
+    rand_forest() %>%
+    set_mode("regression") %>%
+    set_engine(
+      "ranger",
+      importance = "impurity"
+    ) %>%
+    fit(
+      formula = cost ~ .,
+      data = df_train_split %>% select(!id)
+    )
+  
+  rf_var_imp_main <- 
+      rf_fit_main %>%
+      vi()
+  
+  save( # caching does not really work for som reason
+    rf_var_imp_main,
+    file = here("Output/02_featImp_main.RData")
+  )
+  
+}
+
+```
+
+```{r}
+#| fig-height: 4
+
+load(here("Output/02_featImp_main.RData"))
+
+rf_var_imp_main %>%
+  vip(num_features = 15)
+
+```
+
+
+### With interaction features
+
+```{r}
+#| cache: true
+
+# -- Include "brute force" interaction terms
+
+rerun_int <- FALSE
+if (rerun_int) {
+  rf_rec_int <- 
+    recipe(
+      formula = cost ~ .,
+      data = df_train_split %>% select(!id)
+    ) %>% 
+    step_interact(
+      terms = ~ all_numeric_predictors():all_nominal_predictors()
+    )
+  
+  rf_spec_int <- 
+    rand_forest() %>% 
+    set_mode("regression") %>% 
+    set_engine(
+      "ranger",
+      importance = "impurity"
+    )
+  
+  rf_wflow_int <- 
+    workflow() %>% 
+    add_recipe(rf_rec_int) %>% 
+    add_model(rf_spec_int)
+  
+  rf_fit_int <- 
+    rf_wflow_int %>% 
+    fit(df_train_split %>% select(!id))
+  
+  rf_var_imp <- 
+      rf_fit_int %>%
+      extract_fit_parsnip() %>% 
+      vi()
+  
+  save(
+    rf_var_imp,
+    file = here("Output/02_featImp_int.RData")
+  )
+  
+}
+
+```
+
+```{r}
+#| cache: true
+#| fig-height: 11
+
+load(here("Output/02_featImp_int.RData"))
+
+rf_var_imp %>%
+  vip(num_features = 100)
+
+```
+
+
+# To do
+
+* Acount for data scarcity
+* Bin categorical features
+* Normalize predictors
+* Salad bar and prepared food is the same variable
+* Try to include external data as well
