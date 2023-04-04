@@ -26,7 +26,7 @@ rmsle_vec <- function(truth, estimate, na_rm = TRUE, ...) {
   
   rmsle_impl <- function(truth, estimate) {
     
-    sqrt(mean((log(1 + truth) - log(1 + estimate)) ^ 2))
+    sqrt(mean((log1p(truth) - log1p(estimate)) ^ 2))
     
   }
   

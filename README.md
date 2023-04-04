@@ -23,6 +23,8 @@ The tracking itself is carried out using a tibble with list cols, to which each 
 ## Tidymodels notes
 A workflow_set creates a cartesian product of recipes and model specs. Sometimes, specific recipes only work with specific model specs and vice versa. In this case, simply create another workflow_set with these recipes and specs. Combine all workflow_sets in the end in order to compare models. 
 
+Next time, lets try stacking in the tidymodels framework! Ensembling many competitive models turned out to be the winning solution to the competition. 
+
 ## Note on the competition metric
 
 * https://www.kaggle.com/competitions/playground-series-s3e11/discussion/396295

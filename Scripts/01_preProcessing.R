@@ -25,12 +25,46 @@ library(tidymodels)
 df_train <- fread("./Data/train.csv")
 df_test <- fread("./Data/test.csv")
 
+df_train_org <- fread("./Data/original/train_dataset.csv")
+
 # ------------------------------------------------------------------------------------------------------ #
 # PROGRAM
 # ------------------------------------------------------------------------------------------------------ #
 
 df_train %>% str  
 df_train %>% summary
+
+df_train_org %>% str
+df_train_org %>% summary
+
+# -- Create ID for original data
+#    starts at 1e6 to be able to distinguish from df_train
+
+df_train_org %<>% 
+  mutate(
+    id = 1e6 + (row_number() - 1)
+  ) %>% 
+  select(
+    id,
+    everything()
+  )
+
+# -- Create indicator for original data
+
+df_train %<>% 
+  mutate(
+    original = 0L
+  )
+
+df_train_org %<>% 
+  mutate(
+    original = 1L
+  )
+
+df_test %<>% 
+  mutate(
+    original = 0L
+  )
 
 
 # -- Rename 
@@ -46,6 +80,11 @@ df_test %<>%
   rename_with(.fn = ~ gsub("\\.\\d", "", .x)) %>% 
   rename_with(.fn = ~ gsub("\\(.*\\)", "", .x))
 
+
+df_train_org %<>% 
+  rename_with(.fn = ~ gsub("\\s", "\\.", .x)) %>% 
+  rename_with(.fn = ~ gsub("\\.\\d", "", .x)) %>% 
+  rename_with(.fn = ~ gsub("\\(.*\\)", "", .x))
 
 # -- Factor encoding
 #    A number of predictors are ordinal factors, which we will encode as a 
@@ -65,6 +104,12 @@ df_train[
 ]
 
 df_test[
+  ,
+  (vars_factor) := map(.SD, ~ as_factor(.x) %>% as.ordered),
+  .SDcols = vars_factor
+]
+
+df_train_org[
   ,
   (vars_factor) := map(.SD, ~ as_factor(.x) %>% as.ordered),
   .SDcols = vars_factor
@@ -94,8 +139,14 @@ df_test[
   .SDcols = vars_binary
 ]
 
+df_train_org[
+  ,
+  (vars_binary) := map(.SD, as.integer),
+  .SDcols = vars_binary
+]
+
 # -- Data split
-# The classes are imbalanced, so we split accordingly
+#    We do not inlcude original data in the test  data
 
 set.seed(1682468)
 
@@ -112,6 +163,7 @@ output_01 <-
   list(
     "df_train" = df_train,
     "df_test" = df_test,
+    "df_train_org" = df_train_org,
     "data_split" = data_split
   )
 
@@ -119,3 +171,4 @@ save(
   output_01,
   file = "./Output/01_output.RData"
 )
+

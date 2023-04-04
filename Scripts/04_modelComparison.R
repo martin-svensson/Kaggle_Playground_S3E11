@@ -20,6 +20,7 @@ library(magrittr)
 
 library(tidymodels)
 library(finetune) # race approach
+library(bonsai) # lightgbm
 
 library(tictoc)
 
@@ -40,6 +41,31 @@ source("./Scripts/04b_customMetrics.R")
 
 df_train_split <- training(output_01$data_split)
 
+# using the combined data yields much better results
+df_train_split_comb <- 
+  df_train_split %>% 
+  rows_append(
+    y = output_01$df_train_org
+  )
+
+cost_log <- TRUE # do we use rmse as loss? Then we log1p transform
+
+if (cost_log) { # we cannot transform predictions in tune_grid, so this is easier than step_mutate(cost = log1p(cost), skip = TRUE)
+  
+  df_train_split_comb[
+    ,
+    cost := log1p(cost)
+  ]
+  
+}
+
+my_metric <- 
+  ifelse(
+    cost_log,
+    "rmse",
+    "rmsle"
+  )
+
 # ---- Model Specifications ----------------------------------------------------
 
 # -- xgboost
@@ -55,7 +81,6 @@ xgb_spec <-
   set_mode("regression") %>% 
   set_engine(
     "xgboost",
-    # loss function in correspondence with evaluation. We may want to treat it as a hyperparameter
     objective = "reg:squaredlogerror",
     lambda = 0.02, # L2 reg
     alpha = 9e-7, # L1 reg
@@ -63,6 +88,37 @@ xgb_spec <-
     counts = FALSE
   ) 
 
+# -- GLM
+glm_spec <- 
+  linear_reg(
+    penalty = 1
+  ) %>% 
+  set_mode("regression") %>% 
+  set_engine(
+    "glmnet"
+    #family = Gamma(link = "inverse")
+  )
+
+# -- Light GBM
+lightgbm_spec <- 
+  boost_tree(
+    tree_depth = 8, 
+    learn_rate = 0.1, 
+    loss_reduction = 0.1, 
+    min_n = 15, 
+    sample_size = 0.6, 
+    trees = 4000
+  ) %>% 
+  set_mode("regression") %>% 
+  set_engine(
+    "lightgbm"
+  ) 
+
+# -- GAM
+gam_spec <- # takes way too long to tune ...
+  gen_additive_mod(
+    mode = "regression"
+  )
 
 # ---- Workflow set ------------------------------------------------------------
 
@@ -70,87 +126,73 @@ wflow <-
   workflow_set(
     preproc = 
       list(
-        "recipe_1" = output_03$recipe_1,
-        "recipe_2" = output_03$recipe_2,
-        "recipe_3" = output_03$recipe_3
-      ), 
+        "recipe_play" = output_03$recipe_play
+        #"recipe_play" = output_03$recipe_play
+        #"recipe_2_comb" = output_03$recipe_2_comb
+      ),
     models = 
       list(
-        "xgboost" = xgb_spec
+        #"gam" = gam_spec # way too slow 
+        #"xgboost" = xgb_spec,
+        #"glm" = glm_spec,
+        "lightgbm" = lightgbm_spec
       )
   )
 
+# GAM update formula
+# wflow %<>% 
+#   update_workflow_model(
+#     id = "recipe_1_gam",
+#     spec = gam_spec,
+#     formula = 
+#       log1p(cost) ~ 
+#       s(store_sqft, total_children, num_children_at_home, avg_cars_at.home, bs='re')
+#     + coffee_bar
+#     + video_store
+#     + prepared_food * florist
+#   )
+
+# it is necessary to create wflow_comb for models using the combined data, 
+# because the data used to create resamples is fixed (we cannot simply pass the data from the recipe, unfortunately)
 
 # ---- Tune models -------------------------------------------------------------
 
 my_metric_set <- 
   metric_set(
-    rmsle
+    rmse
+    #rmsle
   )
-
-tune_switch <- FALSE
-# TRUE: hyperparameter tuning for parameters tagged with tune()
-# FALSE: CV error estimate. Useful for comparing recipes without tuning any parameters
-
-if (tune_switch) {
   
-  tic("grid search")
-  cv_results <- 
-    wflow %>% 
-    workflow_map(
-      #"tune_race_anova", # faster, more crude, tuning compared to grid search
-      seed = 30349,
-      resamples = 
-        vfold_cv(
-          df_train_split, 
-          v = 5,
-          strata = cost
-        ),
-      grid = 5,
-      control = 
-        control_grid( # use control_race to use the race methodology
-          save_pred = TRUE,
-          parallel_over = NULL, # automatically chooses betweeen "resamples" and "everything"
-          save_workflow = FALSE
-        ),
-      metrics = my_metric_set
-    )
-  toc()
-  
-} else {
-  
-  tic("CV error estimate")
-  cv_results <- 
-    wflow %>% 
-    workflow_map(
-      "fit_resamples",
-      seed = 92764,
-      resamples = 
-        vfold_cv(
-          df_train_split, 
-          v = 5,
-          strata = cost
-        ),
-      control = 
-        control_resamples(
-          save_pred = TRUE,
-          parallel_over = NULL, # automatically chooses betweeen "resamples" and "everything"
-          save_workflow = FALSE
-        ),
-      metrics = my_metric_set
-    )
-  toc()
-  
-}
-
-
+tic("grid search")
+cv_results <- 
+  wflow %>% 
+  workflow_map(
+    # fit_resamples is used automatically when no parameters are tagged with tune()
+    #"tune_race_anova", # faster, more crude, tuning compared to grid search
+    seed = 30349,
+    resamples = 
+      vfold_cv(
+        df_train_split_comb, 
+        v = 5,
+        strata = cost
+      ),
+    grid = 5,
+    control = 
+      control_grid( # use control_race to use the race methodology
+        save_pred = TRUE,
+        parallel_over = NULL, # automatically chooses betweeen "resamples" and "everything"
+        save_workflow = FALSE
+      ),
+    metrics = my_metric_set
+  )
+toc()
 
 # ---- Compare models ----------------------------------------------------------
 
 # -- Best model
 cv_results %>% 
   autoplot(
-    metric = "rmsle",
+    metric = my_metric,
     select_best = TRUE
   ) + 
   geom_text(
@@ -166,22 +208,22 @@ cv_results %>%
   theme(legend.position = "none")
 
 # -- Parameter values for xgboost
+tune_switch <- FALSE
 if (tune_switch) {
   
-cv_results %>% 
-  autoplot(
-    id = "recipe_2_xgboost",
-    metric = "rmsle"
-  )
+  cv_results %>% 
+    autoplot(
+      id = "recipe_play_lightgbm",
+      metric = "rmse"
+    )
   
 }
-
 
 # -- Analysis of residuals
 cv_best_res <- 
   cv_results %>% 
   filter(
-    wflow_id == "recipe_1_xgboost"
+    wflow_id == "recipe_play_lightgbm"
   ) %>% 
   .$result %>% 
   .[[1]] %>% # there is probably a better way to extract the results
@@ -267,7 +309,7 @@ exp_results$tuned.par <-
   map(
     ~ cv_results %>% 
       extract_workflow_set_result(.x) %>% 
-      select_best(metric = "rmsle")
+      select_best(metric = "rmse")
   )
 
 exp_results$metrics <- 
@@ -275,7 +317,7 @@ exp_results$metrics <-
   purrr::set_names() %>%
   map(
     ~ cv_results %>% 
-      rank_results(select_best = TRUE) %>% 
+      workflowsets::rank_results(select_best = TRUE) %>% 
       select(
         wflow_id,
         .metric,

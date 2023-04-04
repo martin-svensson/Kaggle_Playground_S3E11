@@ -36,38 +36,113 @@ source("./Scripts/04b_customMetrics.R")
 # PROGRAM
 # ------------------------------------------------------------------------------------------------------ #
 
+df_train_comb <- 
+  output_01$df_train %>% 
+  rows_append(
+    y = output_01$df_train_org
+  )
+
+df_train_split <- training(output_01$data_split)
+
+# using the combined data yields much better results
+df_train_split_comb <- 
+  df_train_split %>% 
+  rows_append(
+    y = output_01$df_train_org
+  )
+
 df_test_split <- testing(output_01$data_split)
 
-best_wflow_id <- "recipe_2_xgboost"
+cost_log <- TRUE # do we use rmse as loss? Then we log1p transform
+if (cost_log) { # we cannot transform predictions in tune_grid, so this is easier than step_mutate(cost = log1p(cost), skip = TRUE)
+  
+  df_train_split_comb[
+    ,
+    cost := log1p(cost)
+  ]
+  
+  df_train_comb[
+    ,
+    cost := log1p(cost)
+  ]
+  
+}
+
+
+# ---- Performance estimate on test set ----------------------------------------
+
+best_wflow_id <- "recipe_play_lightgbm"
 
 cv_results_best <- 
   output_04$cv_results %>% 
   extract_workflow_set_result(best_wflow_id) %>% 
-  select_best(metric = "rmsle")
+  select_best(metric = "rmse")
 
-# ---- Performance estimate on test set ----------------------------------------
+comb <- TRUE
 
-performance_est <- 
-  output_04$output_04$cv_results %>% 
-  extract_workflow(
-    best_wflow_id
-  ) %>% 
-  finalize_workflow(
-    output_04$cv_results_best
-  ) %>% 
-  last_fit(
-    split = output_01$data_split,
-    metrics = output_04$my_metric_set
-  )
+if (comb) { # last_fit uses the training data defined by data_split, which is the uncombined data. Therefore, we have do it "manually".
+            # or maybe we dont ... I get the exact same .estimate, so maybe last_fit uses the data supplied to the recipe
+  
+  last_fit <- 
+    output_04$cv_results %>%
+      extract_workflow(
+        best_wflow_id
+      ) %>% 
+      # finalize_workflow(
+      #   output_04$cv_results_best
+      # ) %>% 
+      fit(df_train_split_comb)
+  
+  last_fit_preds <- 
+    last_fit %>% 
+    predict(new_data = df_test_split) %>% 
+    mutate(
+      .pred = expm1(.pred)
+    ) %>% 
+    bind_cols(df_test_split)
+  
+} else {
+  
+  performance_est <-
+    output_04$cv_results %>%
+    extract_workflow(
+      best_wflow_id
+    ) %>%
+    # finalize_workflow(
+    #   output_04$cv_results_best
+    # ) %>%
+    last_fit(
+      split = output_01$data_split,
+      metrics = output_04$my_metric_set
+    )
+    
+}
 
 # Performance
-performance_est %>% 
-  collect_metrics()
+best_wflow_estimate <- 
+  if (comb) {
+    rmsle(
+      truth = cost,
+      estimate = .pred,
+      data = last_fit_preds
+    )
+  } else {
+    performance_est %>% 
+      collect_metrics()
+  }
 
 # Predictions
 df_test_preds <- 
-  performance_est %>% 
-  collect_predictions()
+  if (comb) {
+      
+    last_fit_preds
+    
+  } else {
+    
+    performance_est %>% 
+    collect_predictions()
+    
+  }
 
 df_test_preds %>% 
   ggplot(aes(x = cost, y = .pred)) +
@@ -116,8 +191,7 @@ exp_results$tuned.par <-
   )
 
 exp_results$metrics <- 
-  performance_est %>% 
-  collect_metrics() %>% 
+  best_wflow_estimate %>% 
   mutate(
     wflow_id = best_wflow_id
   ) %>% 
@@ -149,16 +223,15 @@ wflow_final_spec <-
 
 wflow_final_fit <- 
   wflow_final_spec %>% 
-  fit(output_01$df_train)
-
-wflow_final_fit <- 
-  wflow_final_spec %>% 
-  fit(output_01$df_train)
+  fit(df_train_comb)
 
 subm_pred <- 
   wflow_final_fit %>% 
   predict(
     new_data = output_01$df_test
+  ) %>% 
+  mutate(
+    .pred = expm1(.pred)
   )
 
 df_subm <- 
@@ -174,3 +247,9 @@ df_subm <-
 
 df_subm %>% 
   fwrite(file = "./Output/05_submission.csv") 
+
+# -- save tracking data
+save(
+  df_expTracking,
+  file = "./Output/04a_tracking.RData"
+)

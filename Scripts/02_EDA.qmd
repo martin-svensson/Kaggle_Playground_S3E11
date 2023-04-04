@@ -277,7 +277,7 @@ rf_var_imp %>%
 # To do
 
 * Acount for data scarcity
-* Bin categorical features
+* Bin categorical features. Note in particular that there are 20 unique values of store_sqft, each of which denote a different store. We might want to encode this as a factor. 
 * Normalize predictors
 * Salad bar and prepared food is the same variable
 * Try to include external data as well
